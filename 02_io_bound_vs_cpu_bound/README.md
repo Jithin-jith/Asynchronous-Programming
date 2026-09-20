@@ -52,7 +52,7 @@ A common misconception in Python asynchronous programming is assuming that wrapp
 
 ## 💻 Script-by-Script Breakdown & Line-by-Line Guide
 
-### 1. [`01_io_bound_demo.py`](file:///f:/Projects/Asynchronous-Programming/02_io_bound_vs_cpu_bound/01_io_bound_demo.py)
+### 1. [`01_io_bound_demo.py`](file:Asynchronous-Programming/02_io_bound_vs_cpu_bound/01_io_bound_demo.py)
 * **Goal**: Demonstrate how non-blocking cooperative multitasking yields the CPU during I/O waits, overlapping request latencies.
 * **Key Concept**: Total execution time equals $\max(t_1, t_2, \dots, t_n)$, NOT $\sum(t_i)$.
 
@@ -67,7 +67,7 @@ A common misconception in Python asynchronous programming is assuming that wrapp
 
 ---
 
-### 2. [`02_cpu_bound_demo.py`](file:///f:/Projects/Asynchronous-Programming/02_io_bound_vs_cpu_bound/02_cpu_bound_demo.py)
+### 2. [`02_cpu_bound_demo.py`](file:Asynchronous-Programming/02_io_bound_vs_cpu_bound/02_cpu_bound_demo.py)
 * **Goal**: Demonstrate the **CPU-Bound Anti-Pattern** in pure `asyncio`.
 * **Key Concept**: Simply placing `async def` in front of a function containing no `await` expressions will **NOT** make it non-blocking. Execution remains strictly sequential ($T_{\text{total}} = T_1 + T_2 + T_3 + T_4$).
 
@@ -82,7 +82,7 @@ A common misconception in Python asynchronous programming is assuming that wrapp
 
 ---
 
-### 3. [`03_benchmarks.py`](file:///f:/Projects/Asynchronous-Programming/02_io_bound_vs_cpu_bound/03_benchmarks.py)
+### 3. [`03_benchmarks.py`](file:Asynchronous-Programming/02_io_bound_vs_cpu_bound/03_benchmarks.py)
 * **Goal**: Benchmark Pure Asyncio (Sequential Main Thread) vs `ProcessPoolExecutor` (Multi-Core Multiprocessing).
 * **Key Concept**: Bypassing the GIL by offloading CPU workloads to worker processes via `loop.run_in_executor()`.
 
