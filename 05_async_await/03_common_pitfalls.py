@@ -60,7 +60,8 @@ async def main():
     print("\n2. Attempting to await a non-awaitable integer primitive (await 2.0):")
     
     async def _invalid_await():
-        return await asyncio.sleep(2.0)  # Primitive int cannot be awaited
+        return await 2.0  # Primitive float primitive 2.0 cannot be awaited
+
         
     try:
         await _invalid_await()
