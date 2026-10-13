@@ -1,69 +1,65 @@
 # Module 01: Synchronous vs Asynchronous Programming
 
 ## 📌 Executive Summary
-This module introduces the fundamental paradigm shift from **Synchronous (Sequential Blocking)** execution to **Asynchronous (Concurrent Non-Blocking)** execution in Python. Understanding this core distinction is essential before working with event loops, coroutines, or high-concurrency LLM pipelines.
+This module introduces the fundamental paradigm shift from **Synchronous (Sequential Blocking)** execution to **Asynchronous (Concurrent Non-Blocking)** execution in Python using real-world **SQLite database operations** (`ecommerce.db`) and **Google Gemini LLM calls**.
+
+> **Note for Users & GitHub Visitors:**  
+> If an LLM subscription or API key is not available, the user can use `asyncio.sleep()` to execute code. All scripts include automatic, graceful fallbacks to sleep simulation so the code runs seamlessly in any environment.
 
 ---
 
 ## 📖 Theoretical Deep Dive
 
 ### 1. Synchronous Execution Model (Sequential & Blocking)
-In traditional synchronous Python, code is executed line by line on a single OS thread. When a synchronous function executes a long-running I/O operation (such as waiting for a database response, disk write, or network request), the executing thread **blocks** (pauses entirely). No other Python code can execute on that thread until the current operation finishes.
+In traditional synchronous Python, code is executed line by line on a single OS thread. When a function executes a long-running I/O operation (such as querying a SQLite database with `sqlite3` or sending an HTTP request to Google Gemini API), the executing thread **blocks** (pauses entirely). No other Python code can execute on that thread until the current operation finishes.
 
 ```
 Synchronous Single-Thread Timeline:
-Task 1: [=== Compute ===][========== Wait for I/O (1s) ==========][=== Done ===]
-Task 2:                                                                         [=== Compute ===][========== Wait for I/O (1s) ==========][=== Done ===]
-Task 3:                                                                                                                                         [=== Compute ===]...
+User 1: [SQLite Query][========== Gemini LLM Call (10s) ==========][=== Done ===]
+User 2:                                                            [SQLite Query][=== Gemini LLM (6s) ===][=== Done ===]
+User 3:                                                                                                  [SQLite Query]...
 
-Total Execution Time = Time(Task 1) + Time(Task 2) + Time(Task 3)
+Total Execution Time = Time(User 1) + Time(User 2) + Time(User 3) ≈ 30s
 ```
 
 #### Disadvantages of Synchronous I/O:
-- **Low CPU Utilization**: The CPU sits idle for over 95% of the duration of a network call.
-- **Poor Scalability**: Handling 1,000 concurrent network requests synchronously requires spawning 1,000 OS threads (high memory overhead) or taking 1,000 seconds sequentially.
+- **Low CPU Utilization**: The CPU sits idle while waiting for disk I/O and remote LLM API response packets.
+- **Poor Scalability**: Processing 10 user LLM insights sequentially would take ~100 seconds on a single thread.
 
 ---
 
 ### 2. Asynchronous Execution Model (Concurrent & Non-Blocking)
-Asynchronous programming uses an **Event Loop** operating on a single thread. When an asynchronous task reaches an I/O wait point (marked by the `await` keyword), it **yields control** back to the Event Loop. The Event Loop immediately switches execution to another pending task that is ready to run.
+Asynchronous programming uses an **Event Loop** operating on a single thread. When an asynchronous task reaches an I/O wait point (such as `await aiosqlite.connect(...)` or `await client.aio.models.generate_content(...)`), it **yields control** back to the Event Loop. The Event Loop immediately switches execution to another pending user task that is ready to run.
 
 ```
 Asynchronous Single-Thread Timeline (Event Loop):
-Task 1: [Start].. (Yields on I/O) ................................................ [Resumes & Completes]
-Task 2:          [Start].. (Yields on I/O) ....................................... [Resumes & Completes]
-Task 3:                   [Start].. (Yields on I/O) .............................. [Resumes & Completes]
-Loop:   [Polls ready tasks] --------> [Polls ready tasks] --------> [Completes all]
+User 1: [SQLite Query].. (Yields on Gemini await) ................................. [Resumes & Completes]
+User 2:        [SQLite Query].. (Yields on Gemini await) .......................... [Resumes & Completes]
+User 3:               [SQLite Query].. (Yields on Gemini await) .................. [Resumes & Completes]
+Loop:   [Polls ready tasks] ---------------------------------------------> [Completes all]
 
-Total Execution Time ≈ Max(Time(Task 1), Time(Task 2), Time(Task 3))
+Total Execution Time ≈ Max(Time(User 1), Time(User 2), Time(User 3)) ≈ 10s (~3x faster!)
 ```
 
 #### Key Advantages of Asynchronous I/O:
-- **High Concurrency**: A single Python thread can manage tens of thousands of open socket connections simultaneously.
-- **Low Memory Overhead**: Avoids the heavy stack allocation overhead of operating system threads (~8MB per thread vs a few kilobytes per coroutine).
-
----
-
-## 🔬 Under the Hood: Memory & Context Switching Mechanics
-
-When Python executes a synchronous function, a new call stack frame is pushed onto the thread stack. When `time.sleep(1)` is called, the CPython interpreter invokes the operating system kernel's `sleep` system call (`select()` or `nanosleep()`), causing the OS kernel to set the entire OS thread state to **WAITING/BLOCKED**.
-
-In contrast, when an `async def` coroutine calls `await asyncio.sleep(1)`, no OS system call blocks the thread. Instead, CPython suspends the coroutine's internal generator frame (`CORO_SUSPENDED`), registers a timer callback in the event loop's priority queue, and immediately returns control to the loop dispatcher to run the next available task.
+- **High Concurrency**: A single Python thread can manage tens of thousands of open socket connections and database sessions simultaneously.
+- **Low Memory Overhead**: Avoids spawning separate heavy OS threads (~8MB per thread vs a few kilobytes per coroutine).
 
 ---
 
 ## 💻 Script-by-Script Breakdown
 
 ### 1. `01_sync_demo.py`
-- **Purpose**: Demonstrates standard sequential blocking execution using `time.sleep()`.
-- **Key Takeaway**: Shows how 3 sequential calls taking 1.0 second each result in a total execution time of ~3.0 seconds.
+- **Real-World Workload**: Sequential SQLite queries using standard `sqlite3` and sequential Google Gemini LLM customer welcome notes.
+- **Key Takeaway**: Demonstrates how 3 sequential requests block the thread one by one, resulting in a cumulative execution time equal to the sum of all operations (~30 seconds).
 
 ### 2. `02_async_demo.py`
-- **Purpose**: Demonstrates non-blocking concurrent execution using `asyncio.sleep()` and `asyncio.gather()`.
-- **Key Takeaway**: Shows how 3 concurrent calls taking 1.0 second each complete in ~1.0 second total because they wait concurrently.
+- **Real-World Workload**: Asynchronous SQLite queries via `aiosqlite` and concurrent Google Gemini LLM generation via `client.aio.models.generate_content` scheduled with `asyncio.gather()`.
+- **Key Takeaway**: All 3 users start, query SQLite, and wait on Gemini concurrently. Total time drops to ~10 seconds (~3x speedup on 3 requests).
 
 ### 3. `03_comparison_benchmark.py`
-- **Purpose**: Runs a side-by-side performance benchmark of 10 tasks run synchronously vs asynchronously, calculating the exact speedup factor.
+- **Real-World Workload**: Side-by-side benchmark executing 4 user profiles through synchronous vs asynchronous pipelines.
+- **Key Takeaway**: Mathematically proves the acceleration factor: $\text{Speedup} = \frac{\text{Sync Time}}{\text{Async Time}}$.
 
 ---
 
@@ -71,35 +67,37 @@ In contrast, when an `async def` coroutine calls `await asyncio.sleep(1)`, no OS
 
 ### Running `01_sync_demo.py`:
 ```text
-=== Starting Synchronous Execution ===
-[SYNC] Fetching profile for User 1...
-[SYNC] Retrieved profile for User 1
-[SYNC] Fetching profile for User 2...
-[SYNC] Retrieved profile for User 2
-[SYNC] Fetching profile for User 3...
-[SYNC] Retrieved profile for User 3
---- Synchronous Finished in 3.01 seconds ---
-Fetched users: [{'user_id': 1, 'name': 'User_1'}, {'user_id': 2, 'name': 'User_2'}, {'user_id': 3, 'name': 'User_3'}]
+=================================================================
+  MODULE 01: SYNCHRONOUS EXECUTION DEMO (SQLite + Gemini LLM)
+=================================================================
+[SYNC Worker] >>> Starting pipeline for User #1...
+[SYNC DB] Opening connection to ecommerce.db for User #1...
+[SYNC DB] Retrieved: Alice Johnson (admin, 1 orders)
+[SYNC LLM] Sending prompt to Google Gemini for Alice Johnson (BLOCKING thread)...
+[SYNC Worker] <<< Completed User #1 in 10.09s
+...
+Total Processed     : 3 users
+Total Execution Time: 29.68 seconds
 ```
 
 ### Running `02_async_demo.py`:
 ```text
-=== Starting Asynchronous Execution ===
-[ASYNC] Fetching profile for User 1...
-[ASYNC] Fetching profile for User 2...
-[ASYNC] Fetching profile for User 3...
-[ASYNC] Retrieved profile for User 1
-[ASYNC] Retrieved profile for User 2
-[ASYNC] Retrieved profile for User 3
---- Asynchronous Finished in 1.01 seconds ---
-Fetched users: [{'user_id': 1, 'name': 'User_1'}, {'user_id': 2, 'name': 'User_2'}, {'user_id': 3, 'name': 'User_3'}]
+=================================================================
+  MODULE 01: ASYNCHRONOUS EXECUTION DEMO (aiosqlite + Gemini LLM)
+=================================================================
+[ASYNC Task] >>> Dispatched pipeline for User #1...
+[ASYNC Task] >>> Dispatched pipeline for User #2...
+[ASYNC Task] >>> Dispatched pipeline for User #3...
+...
+Total Processed     : 3 users
+Total Execution Time: 10.40 seconds (~3x Faster!)
 ```
 
 ---
 
 ## ❓ Exercises & Knowledge Checks
 
-1. **Question**: What happens if you call `time.sleep(1)` inside an `async def` function instead of `await asyncio.sleep(1)`?
-   - *Answer*: `time.sleep(1)` invokes the OS-level thread sleep, which **blocks the entire main thread** and stops the event loop from running any other coroutines during that 1 second. Always use `await asyncio.sleep(1)` inside async functions!
+1. **Question**: If an LLM call takes 2 seconds and a database query takes 0.1 seconds, what is the expected time for 5 requests synchronously vs asynchronously?
+   - *Answer*: Synchronously: $5 \times (2 + 0.1) = 10.5\text{s}$. Asynchronously: $\approx 2.1\text{s}$.
 
-2. **Practice Task**: Modify `03_comparison_benchmark.py` to run 50 simulated tasks with a 0.2-second delay. Predict the execution time for both sync and async modes before running the script.
+2. **Practice Task**: If an API key or LLM subscription is not configured, verify how the code safely falls back to `asyncio.sleep()` / `time.sleep()`.

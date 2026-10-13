@@ -1,146 +1,81 @@
-# Module 03: The Asyncio Event Loop
+# Module 03: The Event Loop & Operating System Multiplexers
 
 ## 📌 Executive Summary
-The **Event Loop** is the core reactive engine powering all asynchronous Python applications. It manages task execution queues, processes OS-level I/O signals via system multiplexers (`epoll`, `kqueue`, IOCP), handles callback scheduling (`call_soon`, `call_later`, `call_at`), and maintains high-precision monotonic clocks. Understanding how the event loop operates under the hood is essential for writing efficient, non-blocking Python systems.
+The **Event Loop** is the central orchestrator of `asyncio`. It maintains execution queues, coordinates monotonic clocks, fires scheduled callbacks, and interfaces directly with OS kernel multiplexers (`epoll`, `kqueue`, Windows `IOCP`) to monitor **SQLite file I/O** and **Google Gemini LLM network sockets** without polling or thread freezing.
+
+> **Note for Users & GitHub Visitors:**  
+> If an LLM subscription or API key is not available, the user can use `asyncio.sleep()` to execute code. All scripts include automatic, graceful fallbacks to sleep simulation so the code runs seamlessly in any environment.
 
 ---
 
 ## 📖 Theoretical Deep Dive
 
-### 1. The Event Loop Architecture & Cycle
+### 1. Loop Clock Progression Across Real I/O
+The event loop maintains an internal high-resolution monotonic clock (`loop.time()`) guaranteed never to jump backwards due to NTP updates or clock shifts.
+- In `01_event_loop_basics.py`, we execute an asynchronous SQLite query via `aiosqlite` and an asynchronous Google Gemini LLM API call.
+- Measuring `loop.time()` demonstrates how the internal loop clock advances across real disk and network delays.
 
-```text
-+-------------------------------------------------------------------------+
-|                        EVENT LOOP ITERATION CYCLE                       |
-|                                                                         |
-|  1. SELECT PHASE: Query OS Multiplexer (epoll/kqueue/IOCP) for ready    |
-|     socket read/write file descriptors.                                 |
-|                                                                         |
-|  2. TIMER PHASE: Check priority min-heap (`_scheduled`) for expired    |
-|     `call_later` and `call_at` callback timers.                         |
-|                                                                         |
-|  3. EXECUTION PHASE: Execute all pending callbacks in `_ready` FIFO     |
-|     queue and step coroutine frames (`Task.__step()`).                  |
-|                                                                         |
-|  4. IDLE PHASE: Block/sleep until the next scheduled timer expires or   |
-|     an OS socket I/O interrupt occurs.                                  |
-+-------------------------------------------------------------------------+
+```
+Event Loop Monotonic Timeline:
+Start (t=0.000s) ---> [aiosqlite query (~0.001s)] ---> [Gemini LLM API (~6.0s)] ---> Finish (t=6.001s)
 ```
 
-### 2. Internal Queues & Data Structures
-- **Ready Queue (`loop._ready`)**: A FIFO `collections.deque` containing callbacks ready to run on the very next iteration tick. Populated by `loop.call_soon()`.
-- **Scheduled Timer Heap (`loop._scheduled`)**: A min-heap array of `TimerHandle` objects sorted by absolute monotonic execution time (`when`). Populated by `loop.call_later()` and `loop.call_at()`.
+---
+
+### 2. Timers and Callbacks alongside Real Concurrency
+In `02_callbacks_and_timers.py`, synchronous callbacks are registered directly on the loop:
+- `loop.call_soon()`: Immediate execution on the very next loop tick (e.g. initialization logging).
+- `loop.call_later()`: Relative delay (e.g. database cache eviction).
+- `loop.call_at()`: Absolute monotonic timestamp (e.g. LLM rate limit token refill).
+- Crucially, these callbacks fire smoothly on schedule *while* the event loop is concurrently awaiting an SQLite query and Gemini LLM response.
 
 ---
 
-## 🔬 Under the Hood: Operating System Multiplexers
-
-Behind Python's `asyncio` abstraction layer are native OS kernel multiplexing mechanisms:
-
-```text
-+---------------------+-------------------+---------------------------------------------+
-| Operating System    | Multiplexer Engine| CPython Implementation                      |
-+---------------------+-------------------+---------------------------------------------+
-| Linux Kernel        | epoll             | _UnixSelectorEventLoop (epollselector)      |
-| macOS / FreeBSD     | kqueue            | _UnixSelectorEventLoop (KqueueSelector)     |
-| Windows (Default)   | IOCP (Proactor)   | ProactorEventLoop (IocpProactor)            |
-| Windows (Fallback)  | select            | _WindowsSelectorEventLoop (SelectSelector)  |
-+---------------------+-------------------+---------------------------------------------+
-```
-
-1. **Linux `epoll`**: Monitors millions of file descriptors in $O(1)$ constant time efficiency using kernel event notification buffers.
-2. **macOS / BSD `kqueue`**: Highly optimized kernel event interface for monitoring socket descriptors, signals, timers, and file system modifications.
-3. **Windows IOCP (Input/Output Completion Ports)**: Asynchronous I/O model used by `ProactorEventLoop`. Instead of polling readiness, the OS kernel completes the I/O operation in the background and posts a completion packet to a queue.
+### 3. OS-Level Multiplexers Under the Hood
+In `03_under_the_hood_selector.py`, we inspect the operating system multiplexer powering the event loop:
+- **Linux**: `epoll`
+- **macOS / BSD**: `kqueue`
+- **Windows**: `IOCP` (`ProactorEventLoop`)
+These low-level kernel APIs allow the operating system to notify Python the instant network packets arrive from Google Gemini or when SQLite finishes writing bytes to disk.
 
 ---
 
-## 💻 Script-by-Script Breakdown & Line-by-Line Guide
+## 💻 Script-by-Script Breakdown
 
-### 1. [`01_event_loop_basics.py`](file:Asynchronous-Programming/03_event_loop/01_event_loop_basics.py)
-* **Goal**: Inspect active event loop properties, check running state, and observe monotonic clock progression.
-* **Key Concept**: `asyncio.get_running_loop()` retrieves the active loop; `loop.time()` provides a non-decreasing monotonic clock source (`time.monotonic()`).
-
-#### Line-by-Line Execution Flow:
-| Line Range | Code Element | Architectural Purpose & Execution Behavior |
-| :--- | :--- | :--- |
-| **L25** | `asyncio.get_running_loop()` | Obtains reference to active thread's loop instance. Raises `RuntimeError` if called outside an async coroutine context. |
-| **L28-L29** | `loop.is_running()`, `loop.is_closed()` | Queries loop state flags. `is_running()` returns `True`; `is_closed()` returns `False`. |
-| **L32-L33** | `loop.time()`, `time.perf_counter()` | Reads high-resolution monotonic timestamps. Unaffected by system clock NTP updates. |
-| **L39** | `await asyncio.sleep(0.5)` | **Yield Point**: Suspends coroutine for 0.5s, allowing the loop timer queue to advance. |
-| **L42** | `end_loop_time - start_loop_time` | Calculates exact clock progression delta (~0.500s). |
-| **L47** | `asyncio.run(inspect_event_loop())` | Initializes new loop, runs coroutine, and closes loop upon completion. |
-
----
-
-### 2. [`02_callbacks_and_timers.py`](file:Asynchronous-Programming/03_event_loop/02_callbacks_and_timers.py)
-* **Goal**: Schedule synchronous non-async callbacks directly onto the event loop using `call_soon`, `call_later`, and `call_at`.
-* **Key Concept**: Standard `def` functions can be scheduled directly onto loop queues without defining `async def` coroutines.
-
-#### Line-by-Line Execution Flow:
-| Line Range | Code Element | Architectural Purpose & Execution Behavior |
-| :--- | :--- | :--- |
-| **L22-L37** | `def sync_callback(...)` | Synchronous callback function invoked by the loop during callback/timer execution phases. |
-| **L46** | `loop.call_soon(...)` | Pushes callback to `_ready` FIFO queue. Executes on the **very next iteration tick**. |
-| **L49** | `loop.call_later(1.0, ...)` | Inserts callback into `_scheduled` min-heap targeting relative delay of +1.0s. |
-| **L52** | `loop.call_later(0.5, ...)` | Inserts callback into `_scheduled` min-heap targeting relative delay of +0.5s. |
-| **L56-L59** | `loop.call_at(target, ...)` | Inserts callback into `_scheduled` min-heap targeting absolute timestamp `start_time + 1.5s`. |
-| **L65** | `await asyncio.sleep(2.0)` | Keeps event loop active for 2.0s so all scheduled timers can expire and execute. |
-
----
-
-### 3. [`03_under_the_hood_selector.py`](file:Asynchronous-Programming/03_event_loop/03_under_the_hood_selector.py)
-* **Goal**: Inspect active OS multiplexer backend (`epoll`, `kqueue`, or `IOCP`) and event loop policy.
-* **Key Concept**: Introspecting `loop._selector` or `type(loop)` reveals low-level kernel driver bindings.
-
-#### Line-by-Line Execution Flow:
-| Line Range | Code Element | Architectural Purpose & Execution Behavior |
-| :--- | :--- | :--- |
-| **L23** | `asyncio.get_event_loop_policy()` | Queries default loop policy instance for current OS platform. |
-| **L28** | `loop = asyncio.new_event_loop()` | Instantiates temporary event loop instance for low-level property inspection. |
-| **L34-L38** | `hasattr(loop, "_selector")` | Checks if loop relies on a Selector backend (`_selector`) or Windows IOCP (`ProactorEventLoop`). |
-| **L40** | `loop.close()` | Explicitly releases system resources associated with temporary loop instance. |
+| Script | Real-World Workload | Key Learning Point |
+|---|---|---|
+| `01_event_loop_basics.py` | Asynchronous SQLite admin lookup + Gemini LLM definition | Inspects `loop.is_running()`, `loop.time()` across real database and AI network delays. |
+| `02_callbacks_and_timers.py` | Database telemetry callbacks + Async DB order query + Gemini call | Shows how `call_soon`, `call_later`, and `call_at` fire during concurrent I/O. |
+| `03_under_the_hood_selector.py` | OS multiplexer inspection (`epoll`, `kqueue`, `IOCP`) | Reveals how the kernel wakes async coroutines when DB/LLM packets arrive. |
 
 ---
 
 ## 🏃 Expected Console Outputs
 
-### 1. `01_event_loop_basics.py` Output:
+### Running `01_event_loop_basics.py`:
 ```text
-=== Inspecting Event Loop Instance & Clock ===
-Running Event Loop Instance: <_UnixSelectorEventLoop running=True closed=False debug=False>
+=================================================================
+  MODULE 03: EVENT LOOP INSPECTION WITH REAL SQLITE & GEMINI I/O
+=================================================================
+Running Event Loop Instance: ProactorEventLoop
 Is Loop Running?           : True
 Is Loop Closed?            : False
-Loop Monotonic Clock Time  : 14205.1234
-System Perf Counter        : 14205.1235
-Loop Clock after 0.5s sleep: 14205.6239 (Delta: 0.5005s)
-```
 
-### 2. `02_callbacks_and_timers.py` Output:
-```text
-=== Direct Callback Scheduling on Event Loop ===
-All callbacks registered on event loop queues. Keeping loop alive for 2.0s...
- -> Callback 'Immediate (call_soon)' executed at +0.000s from start!
- -> Callback 'Delayed 0.5s (call_later)' executed at +0.501s from start!
- -> Callback 'Delayed 1.0s (call_later)' executed at +1.002s from start!
- -> Callback 'Absolute 1.5s (call_at)' executed at +1.501s from start!
-Execution complete!
-```
+[Step 1] Executing asynchronous SQLite query...
+  -> DB Result: Admin: Alice Johnson (alice@example.com)
+  -> Loop Monotonic Clock after DB: 1826224.4370s (Delta: 0.0000s)
 
-### 3. `03_under_the_hood_selector.py` Output (Windows / Linux):
-```text
-=== Event Loop OS Multiplexer Inspection ===
-Operating System Platform: win32
-Active Event Loop Policy : WindowsProactorEventLoopPolicy
-Event Loop Class         : ProactorEventLoop
-OS Multiplexer Backend   : Windows Proactor (IOCP - I/O Completion Ports)
+[Step 2] Executing asynchronous Google Gemini LLM call...
+  -> LLM Result: Continuously executes queued tasks, managing asynchronous, non-blocking operations.
+  -> Loop Monotonic Clock after LLM: 1826230.5150s (Delta: 6.0780s)
+Total Loop Time Elapsed: 6.0780s
 ```
 
 ---
 
-## ❓ Exercises & Practical Knowledge Checks
+## ❓ Exercises & Knowledge Checks
 
-1. **Question**: What is the key difference between `time.time()` and `loop.time()`?
-   - **Answer**: `time.time()` reads system wall-clock time which can jump forward or backward due to NTP synchronization or manual user adjustment. `loop.time()` uses `time.monotonic()` which is guaranteed to be strictly non-decreasing, ensuring accurate timer calculations.
+1. **Question**: Why does `loop.time()` use a monotonic clock instead of system wall-clock time (`time.time()`)?
+   - *Answer*: Monotonic clocks are guaranteed never to jump backwards (e.g. during daylight saving changes or NTP sync), ensuring timers in `loop.call_later()` never trigger prematurely or hang indefinitely.
 
-2. **Practice Task**: Use `loop.call_later(1.0, callback)` to schedule a synchronous function that prints a message after 1 second without using `await asyncio.sleep()`.
-
+2. **Practice Task**: If no `GEMINI_API_KEY` is provided in `.env`, verify that `01_event_loop_basics.py` falls back to `asyncio.sleep()` cleanly.

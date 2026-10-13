@@ -5,94 +5,106 @@ Module 03: Scheduling Callbacks & Timers on the Event Loop
 
 CONCEPTS DEMONSTRATED:
 1. `loop.call_soon(callback, *args)`:
-   - Schedules a synchronous callback function to be executed on the VERY NEXT 
-     iteration tick of the event loop.
-   - Pushes callback to the event loop's internal `_ready` FIFO queue.
-
+   - Schedules a synchronous callback function to execute on the VERY NEXT tick
+     of the event loop (e.g. logging DB connection initialization).
 2. `loop.call_later(delay, callback, *args)`:
-   - Schedules a synchronous callback to run after `delay` relative seconds.
-   - Pushes callback to the event loop's min-heap timer queue (`_scheduled`).
-
+   - Schedules a callback after `delay` relative seconds (e.g. database cache eviction).
 3. `loop.call_at(when, callback, *args)`:
-   - Schedules a synchronous callback targeting an absolute monotonic timestamp `when` (`loop.time() + offset`).
-   - Also inserts the callback into the event loop's min-heap timer queue (`_scheduled`).
+   - Schedules a callback at an absolute monotonic timestamp (e.g. LLM rate limit token refill).
+4. Running synchronous callbacks alongside real asynchronous SQLite & Gemini operations.
 
 HOW THIS CODE WORKS:
-- Non-async synchronous functions (`def sync_callback(...)`) can be scheduled directly onto loop queues.
-- `call_soon` executes immediately after the current step completes.
-- `call_later(0.5, ...)` executes when `loop.time()` advances by 0.5 seconds.
-- `call_later(1.0, ...)` executes at +1.0 second.
-- `call_at(target, ...)` executes at absolute target clock timestamp (+1.5 seconds).
+- Schedules three synchronous telemetry/cache callbacks (`call_soon`, `call_later`, `call_at`).
+- Concurrently runs an asynchronous database query and an asynchronous Gemini LLM call.
+- The event loop seamlessly fires the scheduled callbacks when their timers mature while
+  awaiting external I/O responses.
 ===============================================================================
 """
 
-import asyncio  # Asynchronous I/O framework providing event loop callback APIs
+import os
+import sys
+import time
+import asyncio
+import aiosqlite
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+DB_PATH = PROJECT_ROOT / "ecommerce.db"
+load_dotenv(PROJECT_ROOT / ".env")
 
 
-def sync_callback(name: str, start_timestamp: float, loop):
-    """Synchronous callback function invoked directly by the Event Loop during execution phases.
+def db_telemetry_callback(event_type: str, start_time: float, loop):
+    """Synchronous callback executed directly by the event loop during its tick cycle."""
+    elapsed = loop.time() - start_time
+    print(f"  [Callback: {event_type}] Fired at +{elapsed:.3f}s on event loop!")
 
-    Notice that this function is defined with standard 'def' (not 'async def').
-    The event loop can invoke ordinary synchronous functions directly from its queues.
 
-    Args:
-        name (str): Describing label of the scheduled callback type.
-        start_timestamp (float): Initial loop clock timestamp recorded at main start.
-        loop: Active event loop instance used for checking current loop time.
-    """
-    # Line 1: Read current monotonic loop timestamp
-    now = loop.time()
-    
-    # Line 2: Calculate elapsed wall-clock seconds since program initiation
-    elapsed = now - start_timestamp
-    
-    # Line 3: Output callback execution metric to standard output
-    print(f" -> Callback '{name}' executed at +{elapsed:.3f}s from start!")
+async def query_db_task() -> str:
+    """Async task querying database while callbacks are queued."""
+    print("  [Async Task: DB] Fetching total order count from SQLite...")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM orders") as cursor:
+            row = await cursor.fetchone()
+            count = row[0] if row else 0
+    print(f"  [Async Task: DB] Completed! Found {count} orders.")
+    return f"{count} orders"
+
+
+async def query_llm_task(fallback_delay: float = 1.0) -> str:
+    """Async task calling Gemini LLM while timer callbacks are in the loop queue."""
+    print("  [Async Task: LLM] Querying Google Gemini API...")
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key or api_key.strip() in ("", "your_api_key_here"):
+        await asyncio.sleep(fallback_delay)
+        return "[Simulated Gemini Response]"
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        res = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="Summarize the role of an event loop in 6 words.",
+        )
+        summary = res.text.strip().replace("\n", " ")
+        print(f"  [Async Task: LLM] Completed! Gemini response received.")
+        return summary
+    except Exception:
+        await asyncio.sleep(fallback_delay)
+        return "[Simulated Fallback Gemini Response]"
 
 
 async def main():
-    """Main coroutine orchestrating callback registration across different loop queues."""
-    
-    # Line 1: Obtain reference to currently running event loop on main thread
+    print("=================================================================")
+    print("  MODULE 03: EVENT LOOP CALLBACKS & MONOTONIC TIMERS (REAL I/O)")
+    print("=================================================================")
     loop = asyncio.get_running_loop()
-    
-    # Line 2: Record initial monotonic loop clock timestamp
     start_time = loop.time()
-    
-    # Line 3: Print section header banner
-    print("=== Direct Callback Scheduling on Event Loop ===")
-    
-    # Line 4: REGISTRATION 1: call_soon
-    # Pushes 'sync_callback' to loop._ready queue.
-    # Executes on the next iteration tick of the event loop (before any delayed timers).
-    loop.call_soon(sync_callback, "Immediate (call_soon)", start_time, loop)
-    
-    # Line 5: REGISTRATION 2: call_later (1.0 second delay)
-    # Inserts 'sync_callback' into loop._scheduled timer heap targeting (start_time + 1.0s).
-    loop.call_later(1.0, sync_callback, "Delayed 1.0s (call_later)", start_time, loop)
-    
-    # Line 6: REGISTRATION 3: call_later (0.5 second delay)
-    # Inserts 'sync_callback' into loop._scheduled timer heap targeting (start_time + 0.5s).
-    loop.call_later(0.5, sync_callback, "Delayed 0.5s (call_later)", start_time, loop)
-    
-    # Line 7: REGISTRATION 4: call_at (Absolute monotonic timestamp)
-    # Calculate target timestamp: 1.5 seconds in the future on loop monotonic clock
-    target_timestamp = start_time + 1.5
-    
-    # Line 8: Insert 'sync_callback' into timer heap targeting exact monotonic timestamp 'target_timestamp'
-    loop.call_at(target_timestamp, sync_callback, "Absolute 1.5s (call_at)", start_time, loop)
-    
-    # Line 9: Output registration status notification
-    print("All callbacks registered on event loop queues. Keeping loop alive for 2.0s...")
-    
-    # Line 10: NON-BLOCKING YIELD POINT
-    # Keep the event loop running for 2.0 seconds so all scheduled timers can expire and trigger!
-    await asyncio.sleep(2.0)
-    
-    # Line 11: Print completion status message
-    print("Execution complete!")
+
+    # 1. loop.call_soon(): Runs on the immediate next iteration tick
+    loop.call_soon(db_telemetry_callback, "IMMEDIATE_INIT_LOG", start_time, loop)
+
+    # 2. loop.call_later(): Relative timer (runs after 0.3s)
+    loop.call_later(0.3, db_telemetry_callback, "CACHE_EVICTION_0.3s", start_time, loop)
+
+    # 3. loop.call_at(): Absolute timestamp targeting (start_time + 0.6s)
+    target_timestamp = start_time + 0.6
+    loop.call_at(target_timestamp, db_telemetry_callback, "LLM_RATE_LIMIT_RESET_0.6s", start_time, loop)
+
+    # Run asynchronous tasks concurrently while callbacks trigger
+    print("\n[Event Loop] Starting concurrent DB and LLM tasks alongside scheduled timers...")
+    db_res, llm_res = await asyncio.gather(query_db_task(), query_llm_task())
+
+    print("\n----------------- Summary of Results -----------------")
+    print(f"Database Output: {db_res}")
+    print(f"Gemini LLM Note: {llm_res}")
+    print(f"Total Duration : {loop.time() - start_time:.3f}s")
+    print("=================================================================\n")
 
 
 if __name__ == "__main__":
-    # Line 1: Bootstrap event loop, execute main(), and perform clean shutdown
     asyncio.run(main())

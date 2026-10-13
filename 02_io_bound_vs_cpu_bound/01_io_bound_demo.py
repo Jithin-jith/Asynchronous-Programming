@@ -1,102 +1,139 @@
 """
 ===============================================================================
-Module 02: I/O-Bound Workload Asynchronous Demo
+Module 02: I/O-Bound Workload Asynchronous Demo (SQLite + Gemini LLM)
 ===============================================================================
 
 CONCEPTS DEMONSTRATED:
 1. I/O-Bound Workloads:
-   - I/O (Input/Output)-bound operations spend >99% of their total wall-clock time 
-     waiting for external hardware or remote systems (network sockets, disk drives, databases).
+   - Operations that spend >95% of their total wall-clock time waiting for 
+     external resources (disk storage, database engines, remote LLM HTTP sockets).
    - The CPU is almost entirely idle during this wait period.
-
-2. Non-Blocking Asynchronous Sleep (`asyncio.sleep`):
-   - Unlike `time.sleep()` which freezes the OS thread, `await asyncio.sleep()` registers 
-     a timer with the event loop and yields control back immediately.
-   - While one request waits for its timer/socket, the event loop runs other coroutines.
-
-3. Concurrency Latency Mathematics:
-   - Sequential Total Duration = sum(t_1, t_2, ..., t_n) = 1.0 + 0.8 + 1.2 + 0.5 + 1.5 = 5.0s.
-   - Concurrent Total Duration = max(t_1, t_2, ..., t_n) = max(1.0, 0.8, 1.2, 0.5, 1.5) = ~1.5s.
+2. Real-World Asynchronous I/O Primitives:
+   - `aiosqlite.connect()` for non-blocking local database queries.
+   - `client.aio.models.generate_content()` for non-blocking Gemini LLM generation.
+   - Graceful fallback: If LLM subscription is not available, user can use `asyncio.sleep()`.
+3. Concurrency Latency Overlap:
+   - Launching 5 diverse I/O tasks concurrently via `asyncio.gather()` allows the 
+     single OS thread to interleave them all, completing in approx the MAX single latency.
 
 HOW THIS CODE WORKS:
-- `simulate_io_request(request_id, duration)` simulates a non-blocking network API call.
-- We launch 5 concurrent requests with varying latencies using `asyncio.gather()`.
-- OBSERVED RESULT: All 5 requests run concurrently on a SINGLE OS thread, finishing in ~1.5s!
+- Task 1: Async SQLite query fetching users table.
+- Task 2: Async SQLite query fetching products catalogue.
+- Task 3: Async SQLite query calculating total revenue from orders.
+- Task 4: Async Gemini LLM prompt: Summarize product catalogue.
+- Task 5: Async Gemini LLM prompt: Generate inventory restock recommendation.
+- All 5 tasks run concurrently on a single thread.
 ===============================================================================
 """
 
-import asyncio  # Standard library async I/O framework providing event loop & coroutine tools
-import time     # High-resolution performance timer module for accurate duration measuring
+import os
+import sys
+import time
+import asyncio
+import aiosqlite
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+DB_PATH = PROJECT_ROOT / "ecommerce.db"
+load_dotenv(PROJECT_ROOT / ".env")
 
 
-async def simulate_io_request(request_id: int, duration: float) -> str:
-    """Simulates an asynchronous HTTP API network call or database query.
+async def io_query_users() -> str:
+    """I/O Task 1: Asynchronous SQLite query fetching registered users."""
+    print("[I/O Task 1 - SQLite] Connecting to database to fetch users...")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*), GROUP_CONCAT(name, ', ') FROM users") as cursor:
+            row = await cursor.fetchone()
+            count, names = row[0], row[1]
+    print(f"[I/O Task 1 - SQLite] Found {count} users: {names}")
+    return f"Users({count}): {names}"
 
-    In real-world applications, this represents sending a request packet over TCP/IP
-    and waiting for the remote server's response packet to return.
 
-    Args:
-        request_id (int): Unique numeric identifier for tracking request logs.
-        duration (float): Simulated network latency time in seconds.
+async def io_query_products() -> str:
+    """I/O Task 2: Asynchronous SQLite query fetching product catalogue."""
+    print("[I/O Task 2 - SQLite] Connecting to database to fetch products...")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*), AVG(price) FROM products") as cursor:
+            row = await cursor.fetchone()
+            count, avg_price = row[0], row[1]
+    print(f"[I/O Task 2 - SQLite] Found {count} products (Avg Price: ${avg_price:.2f})")
+    return f"Products({count}, Avg: ${avg_price:.2f})"
 
-    Returns:
-        str: Formatted mock JSON/string response payload.
+
+async def io_query_revenue() -> str:
+    """I/O Task 3: Asynchronous SQLite query calculating total revenue."""
+    print("[I/O Task 3 - SQLite] Connecting to database to aggregate sales revenue...")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*), SUM(total_amount) FROM orders WHERE status = 'completed'") as cursor:
+            row = await cursor.fetchone()
+            order_count, total_rev = row[0], row[1]
+    print(f"[I/O Task 3 - SQLite] Completed orders: {order_count}, Total Revenue: ${total_rev:.2f}")
+    return f"Revenue(${total_rev:.2f} across {order_count} orders)"
+
+
+async def io_gemini_llm_call(task_name: str, prompt: str, fallback_delay: float = 1.5) -> str:
+    """I/O Tasks 4 & 5: Asynchronous Google Gemini LLM API call (Network Socket I/O).
+    
+    If LLM subscription is not available, uses await asyncio.sleep() to execute code.
     """
-    # Line 1: Log request dispatch with request identifier and expected latency
-    print(f"[I/O Task] Request #{request_id} sent to remote server (latency: {duration}s)...")
-    
-    # Line 2: NON-BLOCKING COOPERATIVE YIELD POINT
-    # 'await asyncio.sleep(duration)' instructs the event loop to pause this coroutine for 'duration' seconds,
-    # yield execution control back to the event loop thread, and switch to another ready task.
-    # The OS thread remains 100% active and available during this pause!
-    await asyncio.sleep(duration)
-    
-    # Line 3: Log response arrival once the event loop resumes this coroutine after timer expiration
-    print(f"[I/O Task] Request #{request_id} response received after {duration}s!")
-    
-    # Line 4: Return synthesized response payload to the caller
-    return f"Response_Payload_For_Request_{request_id}"
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key or api_key.strip() in ("", "your_api_key_here"):
+        print(f"[{task_name}] No API key. Falling back to await asyncio.sleep({fallback_delay}s)...")
+        await asyncio.sleep(fallback_delay)
+        return f"[Simulated Response for {task_name}]"
+
+    try:
+        from google import genai
+        print(f"[{task_name}] Sending async prompt to Gemini API: '{prompt[:45]}...'")
+        client = genai.Client(api_key=api_key)
+        # NON-BLOCKING await: frees the event loop while waiting for HTTP packets
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        summary = response.text.strip().replace("\n", " ")
+        print(f"[{task_name}] Gemini returned response successfully!")
+        return f"Gemini Output: {summary[:80]}..."
+    except Exception as exc:
+        print(f"[{task_name}] Gemini API error ({exc.__class__.__name__}). Falling back to sleep...")
+        await asyncio.sleep(fallback_delay)
+        return f"[Simulated Fallback for {task_name}]"
 
 
 async def main():
-    """Main coroutine orchestrator for scheduling concurrent I/O operations."""
-    
-    # Line 1: Output test header banner to standard output
-    print("=== Simulating 5 Concurrent I/O Network Requests ===")
-    
-    # Line 2: Record high-resolution start timestamp (in fractional seconds)
+    print("=================================================================")
+    print("  MODULE 02: 5 CONCURRENT REAL-WORLD I/O TASKS (SQLite + Gemini)")
+    print("=================================================================")
     start_time = time.perf_counter()
-    
-    # Line 3: Instantiate 5 coroutine objects with varying latency parameters
-    # NOTE: Calling an 'async def' function creates a coroutine object; it does NOT execute code yet.
+
+    # Schedule 3 database I/O tasks and 2 Gemini LLM network I/O tasks concurrently
     tasks = [
-        simulate_io_request(1, 1.0),  # Task 1: 1.0 second delay
-        simulate_io_request(2, 0.8),  # Task 2: 0.8 second delay
-        simulate_io_request(3, 1.2),  # Task 3: 1.2 seconds delay
-        simulate_io_request(4, 0.5),  # Task 4: 0.5 second delay (will finish first!)
-        simulate_io_request(5, 1.5),  # Task 5: 1.5 seconds delay (determines total max duration)
+        io_query_users(),
+        io_query_products(),
+        io_query_revenue(),
+        io_gemini_llm_call("I/O Task 4 - LLM", "Explain why SQLite and Asyncio pair well together in 1 sentence."),
+        io_gemini_llm_call("I/O Task 5 - LLM", "Give 3 tips for optimizing LLM API latency in 1 sentence."),
     ]
-    
-    # Line 4: Schedule and execute all 5 coroutines concurrently using asyncio.gather()
-    # 'await asyncio.gather(*tasks)' wraps coroutines into tasks, schedules them on the event loop,
-    # overlaps their waiting periods, and suspends main() until ALL tasks return results.
+
+    # asyncio.gather overlaps all 5 waiting times on the single thread
     results = await asyncio.gather(*tasks)
-    
-    # Line 5: Calculate total elapsed wall-clock execution time
+
     elapsed = time.perf_counter() - start_time
-    
-    # Line 6: Output execution metrics and educational summary
-    print(f"\n[SUMMARY] Successfully processed {len(results)} I/O requests!")
-    print(f"[SUMMARY] Total Wall-Clock Time : {elapsed:.2f} seconds")
-    print(f"[SUMMARY] Max Single Delay      : 1.50 seconds")
-    print(f"[SUMMARY] Sum of All Delays     : 5.00 seconds")
-    print("-" * 75)
-    print("TAKEAWAY: Execution completed in ~1.5s (the maximum single delay) instead of")
-    print("5.0s (the sum) because asyncio overlapped all network waiting times concurrently!")
-    print("-" * 75)
+
+    print("\n------------------- Execution Results -------------------")
+    for i, res in enumerate(results, start=1):
+        print(f" Task {i} Result: {res}")
+    print("---------------------------------------------------------")
+    print(f"Total Wall-Clock Time: {elapsed:.2f} seconds")
+    print("TAKEAWAY: All 3 SQLite disk queries and 2 Gemini network calls ran")
+    print("concurrently on a single thread. The event loop overlapped all I/O waits!")
+    print("=================================================================\n")
 
 
 if __name__ == "__main__":
-    # Line 1: Bootstrap the asyncio event loop, execute main(), and perform clean event loop tear-down
     asyncio.run(main())
-

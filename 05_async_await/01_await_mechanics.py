@@ -4,94 +4,115 @@ Module 05: Interleaved Await Mechanics & Cooperative Multitasking
 ===============================================================================
 
 CONCEPTS DEMONSTRATED:
-1. Cooperative Context-Switching: How the `await` keyword yields execution control 
+1. Cooperative Context-Switching: How the `await` keyword yields execution control
    back to the asyncio event loop.
-2. Interleaved Execution: How two concurrent tasks (`task_alpha` and `task_beta`) 
+2. Interleaved Execution: How two concurrent tasks:
+   - Task Alpha (SQLite Database Operations via `aiosqlite`)
+   - Task Beta (Google Gemini LLM Generation via `client.aio` with sleep fallback)
    run concurrently on a single OS thread without thread switches.
-3. Event Loop Scheduling: How timer expirations determine the order of task resume points.
+3. Event Loop Scheduling: The event loop interleaves progress between database
+   disk I/O and LLM network I/O.
 
 HOW THIS CODE WORKS:
-- `main()` creates two tasks using `asyncio.create_task()`:
-    * Task Alpha pauses at `await asyncio.sleep(0.2)`, then later at `await asyncio.sleep(0.3)`.
-    * Task Beta pauses at `await asyncio.sleep(0.1)`, then later at `await asyncio.sleep(0.2)`.
-- Timeline breakdown:
-    - T=0.0s: Both tasks start. Both hit their first `await asyncio.sleep()`. Control yields to event loop.
-    - T=0.1s: Beta's 0.1s sleep expires first -> Beta resumes and logs `[Beta 2]`, then starts 0.2s sleep.
-    - T=0.2s: Alpha's 0.2s sleep expires -> Alpha resumes and logs `[Alpha 2]`, then starts 0.3s sleep.
-    - T=0.3s: Beta's second sleep (0.1 + 0.2 = 0.3s total) expires -> Beta finishes and logs `[Beta 3]`.
-    - T=0.5s: Alpha's second sleep (0.2 + 0.3 = 0.5s total) expires -> Alpha finishes and logs `[Alpha 3]`.
+- `main()` launches Task Alpha and Task Beta concurrently via `asyncio.create_task()`.
+- Task Alpha queries `ecommerce.db` for user orders, yields on `await`, then queries revenue.
+- Task Beta queries Gemini LLM for product marketing, yields on `await`.
+- Execution naturally interleaves on the single thread as each task awaits external I/O.
 ===============================================================================
 """
 
+import os
+import sys
+import time
 import asyncio
+import aiosqlite
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+DB_PATH = PROJECT_ROOT / "ecommerce.db"
+load_dotenv(PROJECT_ROOT / ".env")
 
 
-async def task_alpha() -> str:
-    """
-    Task Alpha: Pauses for 0.2s, resumes, pauses for 0.3s, then completes.
-    Total execution duration: 0.5 seconds.
-    """
-    print("[Alpha 1] Starting Task Alpha...")
+async def task_alpha_database_pipeline() -> str:
+    """Task Alpha: Asynchronous SQLite operations interleaved with event loop."""
+    print("[Alpha 1 - DB] Starting Task Alpha: Connecting to SQLite for user count...")
     
-    # -------------------------------------------------------------------------
-    # YIELD POINT 1 (0.2s):
-    # `await` pauses task_alpha and yields control to the event loop.
-    # The event loop looks for other ready tasks (Task Beta is ready to run).
-    # -------------------------------------------------------------------------
-    await asyncio.sleep(0.2)
-    print("[Alpha 2] Resumed Task Alpha after 0.2s pause!")
+    # YIELD POINT 1: Yields control back to event loop while connecting to SQLite
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+            user_count = (await cursor.fetchone())[0]
+            
+    print(f"[Alpha 2 - DB] Resumed! Total users in DB: {user_count}. Now fetching orders...")
     
-    # -------------------------------------------------------------------------
-    # YIELD POINT 2 (0.3s):
-    # Pauses task_alpha again. Control returns to event loop until T=0.5s.
-    # -------------------------------------------------------------------------
-    await asyncio.sleep(0.3)
-    print("[Alpha 3] Finished Task Alpha!")
-    return "Alpha Output Result"
+    # YIELD POINT 2: Yields control again while querying orders table
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*), SUM(total_amount) FROM orders") as cursor:
+            order_row = await cursor.fetchone()
+            order_count, total_amount = order_row[0], order_row[1]
+
+    print(f"[Alpha 3 - DB] Finished Task Alpha! Orders: {order_count}, Total: ${total_amount:.2f}")
+    return f"DB Summary: {user_count} users, {order_count} orders (${total_amount:.2f})"
 
 
-async def task_beta() -> str:
-    """
-    Task Beta: Pauses for 0.1s, resumes, pauses for 0.2s, then completes.
-    Total execution duration: 0.3 seconds.
-    """
-    print("  [Beta 1] Starting Task Beta...")
+async def task_beta_gemini_pipeline(fallback_delay: float = 1.0) -> str:
+    """Task Beta: Asynchronous Google Gemini LLM API call interleaved with event loop."""
+    print("  [Beta 1 - LLM] Starting Task Beta: Preparing prompt for Google Gemini...")
     
-    # -------------------------------------------------------------------------
-    # YIELD POINT 1 (0.1s):
-    # Yields control to event loop. Since Beta's sleep (0.1s) is shorter than 
-    # Alpha's (0.2s), the event loop will resume Beta BEFORE resuming Alpha!
-    # -------------------------------------------------------------------------
-    await asyncio.sleep(0.1)
-    print("  [Beta 2] Resumed Task Beta after 0.1s pause!")
-    
-    # -------------------------------------------------------------------------
-    # YIELD POINT 2 (0.2s):
-    # Yields control again until T=0.3s total time.
-    # -------------------------------------------------------------------------
-    await asyncio.sleep(0.2)
-    print("  [Beta 3] Finished Task Beta!")
-    return "Beta Output Result"
+    api_key = os.getenv("GEMINI_API_KEY")
+    prompt = "Write a catchy 6-word slogan for an AI cloud platform."
+
+    if not api_key or api_key.strip() in ("", "your_api_key_here"):
+        print(f"  [Beta 1 - LLM] No API key. Yielding at await asyncio.sleep({fallback_delay}s)...")
+        await asyncio.sleep(fallback_delay)
+        print("  [Beta 2 - LLM] Resumed Task Beta after simulated network wait!")
+        return "[Simulated Slogan] AI Cloud: Powering Next-Gen Intelligence"
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        print("  [Beta 1 - LLM] Sending async HTTP request to Gemini API (YIELDING CONTROL)...")
+        
+        # YIELD POINT: The coroutine suspends, allowing Task Alpha to execute database queries!
+        res = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        print("  [Beta 2 - LLM] Resumed Task Beta! Gemini HTTP response packets received.")
+        return res.text.strip().replace("\n", " ")
+    except Exception as exc:
+        print(f"  [Beta 1 - LLM] Gemini call failed ({exc.__class__.__name__}). Using fallback sleep...")
+        await asyncio.sleep(fallback_delay)
+        return "[Fallback Slogan] Empowering your cloud with AI."
 
 
 async def main():
-    print("=== Visualizing Interleaved Await Control Flow ===")
-    
-    # Schedule both coroutines concurrently on the event loop as Tasks
-    t1 = asyncio.create_task(task_alpha())
-    t2 = asyncio.create_task(task_beta())
-    
-    # -------------------------------------------------------------------------
-    # AWAITING TASK RESULTS:
-    # Awaiting `t1` pauses `main()` until `t1` (Task Alpha) completes.
-    # Meanwhile, `t2` (Task Beta) continues running concurrently on the loop!
-    # -------------------------------------------------------------------------
-    res1 = await t1
-    res2 = await t2
-    
-    print(f"\nFinal Returned Results: '{res1}', '{res2}'")
+    print("=================================================================")
+    print("  MODULE 05: INTERLEAVED AWAIT MECHANICS (SQLite DB vs Gemini LLM)")
+    print("=================================================================")
+    start_time = time.perf_counter()
+
+    # Create tasks to schedule them concurrently on the event loop
+    t_alpha = asyncio.create_task(task_alpha_database_pipeline(), name="DB_Task_Alpha")
+    t_beta = asyncio.create_task(task_beta_gemini_pipeline(), name="LLM_Task_Beta")
+
+    # Await both tasks
+    alpha_res, beta_res = await asyncio.gather(t_alpha, t_beta)
+
+    duration = time.perf_counter() - start_time
+
+    print("\n---------------- Concurrency Results ----------------")
+    print(f"Task Alpha Result: {alpha_res}")
+    print(f"Task Beta Result : {beta_res}")
+    print(f"Total Duration   : {duration:.2f} seconds")
+    print("Notice how Task Alpha (DB) and Task Beta (LLM) cooperatively interleaved")
+    print("their execution on the event loop without blocking each other!")
+    print("=================================================================\n")
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
