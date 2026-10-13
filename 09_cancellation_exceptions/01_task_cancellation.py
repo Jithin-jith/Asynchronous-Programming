@@ -40,7 +40,7 @@ async def stream_database_and_ai_audit():
     try:
         cursor = await db.execute("SELECT id, name FROM users")
         users = await cursor.fetchall()
-        
+        print(f"Retrieved {len(users)} users from DB")
         for user_id, user_name in users:
             print(f"  [Audit Worker] Auditing User #{user_id} ({user_name})...")
             # Simulating non-blocking audit step
